@@ -7,14 +7,35 @@
 //! - **AppError**: Unified error type for Axum APIs.
 //! - **Error Macros**: Ergonomic error construction with `app_error!`.
 //! - **TypeScript Type Generation**: Rust error types exported via `ts-rs`.
-//! - **Error Notifications**: Sentry, Slack, Discord integration (optional).
+//! - **Error Notifications**: Pluggable notification system with Slack, Discord, ntfy, and cmdline.io support.
 //! - **Wrapped JSON Responses**: `WrappedJson<T>` and `ResponseKey` derive macro.
 //! - **Health Check Endpoint**: Built-in Axum route for Postgres connectivity.
 //! - **Static File Serving**: SPA and static file helpers for Axum.
 //! - **Bouncer** (optional): Reject and ban IP's hitting invalid endpoints.
 //!
+//! ## Notification System
+//!
+//! The notification system uses a trait-based architecture allowing you to:
+//! - Use built-in providers (Slack, Discord, ntfy, cmdline.io)
+//! - Create custom providers by implementing [`notifier::ErrorNotifier`]
+//! - Configure via builder pattern or environment variables
+//!
+//! ```rust,ignore
+//! use axtra::notifier::NotificationManager;
+//! use axtra::errors::notifiers::init_notification_manager;
+//!
+//! // Auto-configure from environment variables
+//! init_notification_manager(NotificationManager::from_env());
+//!
+//! // Or use builder pattern
+//! let manager = NotificationManager::builder()
+//!     .with_slack("https://hooks.slack.com/...")
+//!     .build();
+//! init_notification_manager(manager);
+//! ```
+//!
 //! ## See Also
-//! - [README](https://github.com/imothee/axtra)
+//! - [README](https://github.com/imothee-io/axtra)
 //! - [API Docs (docs.rs)](https://docs.rs/axtra)
 //! - [Changelog](./CHANGELOG.md)
 

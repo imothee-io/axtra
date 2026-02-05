@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking Changes
+
+- **Slack/Discord providers now use config structs instead of plain URLs**
+  - `with_slack(url)` → `with_slack(SlackConfig::new(url))`
+  - `with_discord(url)` → `with_discord(DiscordConfig::new(url))`
+
+### New Features
+
+- **Configurable mentions for Slack and Discord providers**
+  - `SlackConfig::new(url).with_mention("@oncall")`
+  - `DiscordConfig::new(url).with_mention("<@&role_id>")`
+  - New env vars: `SLACK_ERROR_MENTION`, `DISCORD_ERROR_MENTION`
+
+### Improvements
+
+- Error page HTML files are now cached after first load (no repeated file I/O)
+- Removed hardcoded `@oncall` mention from Slack/Discord providers
+- Removed unused `NotifyError::is_transient()` method
+- Fixed documentation examples to use correct `NotifyFuture` trait signature
+
 ## 0.2.4
 
 - Makes formatted_message public so app_errors can be manually logged 

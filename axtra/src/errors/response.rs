@@ -4,26 +4,24 @@ use axum::{
     Json,
     response::{Html, IntoResponse, Response},
 };
-use std::{fs, path::Path};
+use std::sync::OnceLock;
 
 use crate::errors::{AppError, ErrorCode, ErrorFormat, ErrorResponse};
 
-#[cfg(feature = "notify-error-discord")]
-use crate::errors::notifiers::discord_notifier;
-#[cfg(feature = "notify-error-slack")]
-use crate::errors::notifiers::slack_notifier;
+#[cfg(feature = "notifier")]
+use crate::errors::notifiers::notification_manager;
+#[cfg(feature = "notifier")]
+use crate::notifier::ErrorEvent;
 
-macro_rules! notify_critical_error {
-    ($self:expr) => {
-        #[cfg(feature = "notify-error-slack")]
-        $self.send_slack_notification();
+/// Cached error pages to avoid repeated file I/O.
+static ERROR_PAGE_404: OnceLock<Option<String>> = OnceLock::new();
+static ERROR_PAGE_500: OnceLock<Option<String>> = OnceLock::new();
 
-        #[cfg(feature = "notify-error-discord")]
-        $self.send_discord_notification();
-
-        #[cfg(feature = "sentry")]
-        sentry::capture_error(&$self);
-    };
+/// Load and cache an error page from disk.
+fn load_error_page(path: &str, cache: &'static OnceLock<Option<String>>) -> Option<&'static str> {
+    cache
+        .get_or_init(|| std::fs::read_to_string(path).ok())
+        .as_deref()
 }
 
 impl AppError {
@@ -86,71 +84,43 @@ impl AppError {
         }
     }
 
-    #[cfg(feature = "notify-error-discord")]
-    fn send_discord_notification(&self) {
-        if let Some(notifier) = discord_notifier() {
-            let app_name = std::env::var("APP_NAME").unwrap_or_else(|_| "Rust".to_string());
-            let formatted_message = self.formatted_message();
+    /// Send notification to all configured providers.
+    #[cfg(feature = "notifier")]
+    fn send_notification(&self) {
+        let app_name = std::env::var("APP_NAME").unwrap_or_else(|_| "Rust".to_string());
+        let error_code = self.code();
+        let message = self.log_message();
+        let location = self.location().to_string();
 
-            let embeds = serde_json::json!([
-                {
-                    "title": format!(":red_circle: Exception — {app_name}"),
-                    "color": 16711680, // Red
-                    "fields": [
-                        {
-                            "name": "Details",
-                            "value": format!("```{formatted_message}```"),
-                            "inline": false
-                        },
-                        {
-                            "name": "\u{200B}",
-                            "value": "@oncall",
-                            "inline": false
-                        }
-                    ]
-                }
-            ]);
-            tokio::spawn(async move {
-                let _ = notifier.notify_discord_rich(embeds).await;
-            });
+        // Build the error event
+        let mut event = ErrorEvent::new(app_name, error_code, message, location);
+
+        // Add source error chain if available
+        let source_error = self.source_chain();
+        if !source_error.is_empty() {
+            event = event.with_source_error(source_error);
         }
+
+        // Spawn async task to send notifications
+        tokio::spawn(async move {
+            notification_manager().notify(&event).await;
+        });
     }
 
-    #[cfg(feature = "notify-error-slack")]
-    fn send_slack_notification(&self) {
-        if let Some(notifier) = slack_notifier() {
-            let app_name = std::env::var("APP_NAME").unwrap_or("Rust".to_string());
-            let formatted_message = self.formatted_message();
+    /// Get the error source chain as a string for capture providers.
+    #[cfg(feature = "notifier")]
+    fn source_chain(&self) -> String {
+        use std::error::Error;
 
-            let blocks = serde_json::json!([
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": format!(":red_circle: *Exception* — `{app_name}`")
-                    }
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": format!("```{formatted_message}```")
-                    }
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": "@oncall"
-                        }
-                    ]
-                }
-            ]);
-            tokio::spawn(async move {
-                let _ = notifier.notify_slack_rich(blocks).await;
-            });
+        let mut chain = Vec::new();
+        let mut current: Option<&dyn Error> = Some(self);
+
+        while let Some(err) = current {
+            chain.push(format!("{err}"));
+            current = err.source();
         }
+
+        chain.join("\n  caused by: ")
     }
 }
 
@@ -171,7 +141,8 @@ impl IntoResponse for AppError {
             }
             ErrorCode::Database | ErrorCode::Exception => {
                 tracing::error!("{formatted_message}");
-                notify_critical_error!(self);
+                #[cfg(feature = "notifier")]
+                self.send_notification();
             }
         }
 
@@ -190,26 +161,24 @@ impl IntoResponse for AppError {
                 (status, Json(error_response)).into_response()
             }
             ErrorFormat::Html => {
-                let file_path = match error_code {
-                    ErrorCode::NotFound => "dist/404.html",
-                    _ => "dist/500.html",
+                let cached_page = match error_code {
+                    ErrorCode::NotFound => load_error_page("dist/404.html", &ERROR_PAGE_404),
+                    _ => load_error_page("dist/500.html", &ERROR_PAGE_500),
                 };
 
-                let html_content = fs::read_to_string(Path::new(file_path)).unwrap_or_else(|_| {
+                let html_content = cached_page.map(String::from).unwrap_or_else(|| {
                     format!(
-                        r#"
-                        <!DOCTYPE html>
-                        <html lang="en">
-                        <head>
-                            <meta charset="utf-8">
-                            <title>Error</title>
-                        </head>
-                        <body>
-                            <h1>Error</h1>
-                            <p>{}</p>
-                        </body>
-                        </html>
-                        "#,
+                        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Error</title>
+</head>
+<body>
+    <h1>Error</h1>
+    <p>{}</p>
+</body>
+</html>"#,
                         self.user_message()
                     )
                 });

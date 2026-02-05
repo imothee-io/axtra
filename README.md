@@ -7,8 +7,10 @@
 
 Opinionated helpers for Axum + Astro projects.
 
-> **Warning:** This library is experimental, opinionated, and subject to breaking changes.  
+> **Warning:** This library is experimental, opinionated, and subject to breaking changes.
 > 🐉 Here be dragons 🐉
+
+**Sponsored by [cmdline.io](https://cmdline.io)** - Error tracking and incident management for Rust applications.
 
 ---
 
@@ -31,10 +33,10 @@ Opinionated helpers for Axum + Astro projects.
   - Ensures your frontend and backend share error contracts.
 
 - **Error Notifications**
-  - Send critical errors to a variety of services/notifiers
-    - Sentry integration (optional)
-    - Slack integration (optional)
-    - Discord integration (optional)
+  - Pluggable notification system with trait-based architecture
+  - Built-in providers: Slack, Discord, ntfy, cmdline.io
+  - Create custom providers by implementing `ErrorNotifier` trait
+  - Configure via builder pattern or environment variables
   
 ### Api Responses
 
@@ -58,8 +60,10 @@ Opinionated helpers for Axum + Astro projects.
   - Simple IP banning and malicious path filtering middleware for Axum.
 
 ### Notifications
-- **Notification Integration**
-  - Slack and Discord error notifications
+- **Pluggable Notification System**
+  - Trait-based architecture for custom providers
+  - Built-in: Slack, Discord, ntfy, cmdline.io
+  - Easy to add Sentry, PagerDuty, or any custom provider
 
 ---
 
@@ -109,7 +113,7 @@ struct SignupData {
 }
 
 handler() -> Result<impl IntoResponse, AppError> {
-  let payload signup_data = SignupData { mail: "notemail" };
+  let signup_data = SignupData { mail: "notemail" };
   payload.validate()?;
 }
 ```
@@ -235,64 +239,196 @@ export type SerializableValidationErrors = { errors: Array<ValidationFieldError>
 export type ValidationFieldError = { field: string, code: string, message: string, params: { [key in string]?: string }, };
 ```
 
-### Error Notification Feature Flags
+### Error Notification System
 
-Axtra supports sending critical errors to external services for alerting and monitoring.  
-Enable these features in your `Cargo.toml` as needed:
+Axtra uses a pluggable, trait-based notification system for sending critical errors to external services.
+This design keeps axtra lean and unopinionated—you choose which providers to use and at what versions.
 
-#### `sentry`
+#### Quick Start
 
-- **Purpose:**  
-  Automatically sends `Database` and `Exception` errors to [Sentry](https://sentry.io/) for error tracking.
-- **How to use:**  
-  Enable the feature:
-  ```
-  toml
-  features = ["sentry"]
-  ```
-  Configure Sentry in your app (see [sentry docs](https://docs.rs/sentry)).
-- **Effect:**  
-  When enabled, critical errors are reported to Sentry in addition to being logged.
+```rust
+use axtra::notifier::NotificationManager;
+use axtra::errors::notifiers::init_notification_manager;
 
-#### `notify-error-slack`
+// Auto-configure from environment variables
+init_notification_manager(NotificationManager::from_env());
+```
 
-- **Purpose:**  
-  Sends critical errors (database, exception, throw) to a Slack channel via webhook.
-- **How to use:**  
-  Enable the feature:
-  ```
-  toml
-  features = ["notify-error-slack"]
-  ```
-  Set your webhook URL:
-  ```
-  SLACK_ERROR_WEBHOOK_URL=your_webhook_url
-  ```
-- **Effect:**  
-  When enabled, errors are posted to Slack using the configured webhook.
+#### Builder Pattern (Recommended)
 
-#### `notify-error-discord`
+```rust
+use axtra::notifier::{NotificationManager, SlackConfig, DiscordConfig, NtfyConfig, CmdlineConfig};
+use axtra::errors::notifiers::init_notification_manager;
 
-- **Purpose:**  
-  Sends critical errors (database, exception, throw) to a Discord channel via webhook.
-- **How to use:**  
-  Enable the feature:
-  ```
-  toml
-  features = ["notify-error-discord"]
-  ```
-  Set your webhook URL:
-  ```
-  DISCORD_ERROR_WEBHOOK_URL=your_webhook_url
-  ```
-- **Effect:**  
-  When enabled, errors are posted to Discord using the configured webhook.
+let manager = NotificationManager::builder()
+    .with_slack(SlackConfig::new("https://hooks.slack.com/services/...")
+        .with_mention("@oncall"))
+    .with_discord(DiscordConfig::new("https://discord.com/api/webhooks/..."))
+    .with_ntfy(NtfyConfig::new("my-app-errors"))
+    .with_cmdline(CmdlineConfig::new(std::env::var("CMDLINE_API_KEY").unwrap())
+        .with_environment("production")
+        .with_service("my-app"))
+    .build();
+
+init_notification_manager(manager);
+```
+
+#### Feature Flags
+
+Enable the providers you need in `Cargo.toml`:
+
+```toml
+[dependencies]
+axtra = { version = "0.3", features = ["notify-error-slack", "notify-error-ntfy"] }
+```
+
+| Feature | Provider | Environment Variables |
+|---------|----------|----------------------|
+| `notify-error-slack` | Slack webhook | `SLACK_ERROR_WEBHOOK_URL`, `SLACK_ERROR_MENTION` (optional) |
+| `notify-error-discord` | Discord webhook | `DISCORD_ERROR_WEBHOOK_URL`, `DISCORD_ERROR_MENTION` (optional) |
+| `notify-error-ntfy` | [ntfy](https://ntfy.sh) push notifications | `NTFY_TOPIC`, `NTFY_SERVER_URL` (optional), `NTFY_ACCESS_TOKEN` (optional) |
+| `notify-error-cmdline` | [cmdline.io](https://cmdline.io) error tracking | `CMDLINE_API_KEY`, `ENVIRONMENT` or `ENV`, `SERVICE` or `APP_NAME`, `RELEASE` or `VERSION` |
+
+#### Custom Providers
+
+Implement the `ErrorNotifier` trait to add any provider. This keeps axtra free of version lock-in—you control your dependencies.
+
+##### Sentry Example
+
+```rust
+// In YOUR Cargo.toml (not axtra's):
+// sentry = "0.35"  # whatever version you want
+
+use axtra::notifier::{ErrorNotifier, ErrorEvent, NotifyError, NotifyFuture, NotificationManager, SlackConfig};
+use reqwest::Client;
+use std::sync::Arc;
+
+struct SentryProvider;
+
+impl ErrorNotifier for SentryProvider {
+    fn notify<'a>(&'a self, _client: &'a Client, event: &'a ErrorEvent) -> NotifyFuture<'a> {
+        Box::pin(async move {
+            let level = match event.severity() {
+                "critical" => sentry::Level::Fatal,
+                "major" => sentry::Level::Error,
+                _ => sentry::Level::Warning,
+            };
+
+            sentry::with_scope(
+                |scope| {
+                    scope.set_tag("app_name", &event.app_name);
+                    scope.set_tag("location", &event.location);
+                },
+                || {
+                    sentry::capture_message(&event.message, level);
+                },
+            );
+            Ok(())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "sentry"
+    }
+}
+
+// Usage
+let manager = NotificationManager::builder()
+    .with_provider(Arc::new(SentryProvider))
+    .with_slack(SlackConfig::new("https://hooks.slack.com/..."))
+    .build();
+```
+
+##### cmdline.io Example
+
+The built-in `CmdlineProvider` handles error tracking automatically, but here's how you could customize it:
+
+```rust
+use axtra::notifier::{ErrorNotifier, ErrorEvent, NotifyError, NotifyFuture};
+use reqwest::Client;
+
+struct MyCmdlineProvider {
+    api_key: String,
+    environment: Option<String>,
+    service: Option<String>,
+}
+
+impl ErrorNotifier for MyCmdlineProvider {
+    fn notify<'a>(&'a self, client: &'a Client, event: &'a ErrorEvent) -> NotifyFuture<'a> {
+        Box::pin(async move {
+            client.post("https://cmdline.io/api/ingest/errors")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&serde_json::json!({
+                    "title": format!("{:?}: {}", event.error_code, event.message),
+                    "severity": event.severity(),
+                    "error_type": "exception",
+                    "environment": self.environment,
+                    "service": self.service.as_deref().unwrap_or(&event.app_name),
+                    "message": event.source_error,
+                    "extra": {
+                        "location": event.location,
+                    },
+                }))
+                .send()
+                .await
+                .map_err(NotifyError::transient)?
+                .error_for_status()
+                .map_err(NotifyError::permanent)?;
+
+            Ok(())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "cmdline"
+    }
+}
+```
+
+##### PagerDuty Example
+
+```rust
+use axtra::notifier::{ErrorNotifier, ErrorEvent, NotifyError, NotifyFuture};
+use reqwest::Client;
+
+struct PagerDutyProvider {
+    routing_key: String,
+}
+
+impl ErrorNotifier for PagerDutyProvider {
+    fn notify<'a>(&'a self, client: &'a Client, event: &'a ErrorEvent) -> NotifyFuture<'a> {
+        Box::pin(async move {
+            client.post("https://events.pagerduty.com/v2/enqueue")
+                .json(&serde_json::json!({
+                    "routing_key": self.routing_key,
+                    "event_action": "trigger",
+                    "payload": {
+                        "summary": event.message,
+                        "severity": event.severity(),
+                        "source": event.app_name,
+                        "custom_details": {
+                            "location": event.location,
+                            "error_code": format!("{:?}", event.error_code),
+                        }
+                    }
+                }))
+                .send()
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "pagerduty"
+    }
+}
+```
 
 ---
 
-**Note:**  
-All notification features are opt-in and only send alerts for server-side errors (`Database`, `Exception`, or `throw`).  
-You can enable any combination of these features as needed for your project.
+**Note:**
+All notification features are opt-in and only trigger for server-side errors (`Database`, `Exception`, or `throw`).
+Notifications are sent concurrently to all configured providers.
 
 ---
 
@@ -579,66 +715,98 @@ let app = Router::new()
 
 ## Notifier
 
-Axtra includes a flexible notification system for sending error alerts to Slack and Discord.  
-Enable the `notifier` feature in your `Cargo.toml` to access the Notifier API:
+Axtra includes a pluggable notification system for error alerts and incident tracking.
+Enable provider features in your `Cargo.toml`:
 
 ```toml
-[features]
-notifier = []
+[dependencies]
+axtra = { version = "0.3", features = ["notify-error-slack", "notify-error-ntfy"] }
 ```
 
-You can then use the Notifier struct to send messages to Slack and Discord webhooks.
+### NotificationManager API
 
-### Notifier API
+The `NotificationManager` coordinates multiple providers, sending error events to all of them concurrently.
 
 ```rust
-use axtra::notifier::Notifier;
-use serde_json::json;
+use axtra::notifier::{NotificationManager, SlackConfig, DiscordConfig, NtfyConfig};
+use axtra::errors::notifiers::init_notification_manager;
 
-// Create a notifier for Slack
-let slack = Notifier::with_slack("https://hooks.slack.com/services/XXX");
+// Builder pattern - recommended for explicit configuration
+let manager = NotificationManager::builder()
+    .with_slack(SlackConfig::new("https://hooks.slack.com/services/XXX")
+        .with_mention("@oncall"))
+    .with_discord(DiscordConfig::new("https://discord.com/api/webhooks/XXX"))
+    .with_ntfy(NtfyConfig::new("my-app-errors"))
+    .build();
 
-// Send a simple Slack message
-slack.notify_slack("Hello from Axtra!").await?;
+init_notification_manager(manager);
 
-// Send a rich Slack message (blocks)
-let blocks = json!([{ "type": "section", "text": { "type": "plain_text", "text": "Error occurred!" } }]);
-slack.notify_slack_rich(blocks).await?;
-
-// Create a notifier for Discord
-let discord = Notifier::with_discord("https://discord.com/api/webhooks/XXX");
-
-// Send a simple Discord message
-discord.notify_discord("Hello from Axtra!").await?;
-
-// Send a rich Discord message (embeds)
-let embeds = json!([{ "title": "Error", "description": "Something went wrong!" }]);
-discord.notify_discord_rich(embeds).await?;
+// Or auto-configure from environment variables
+init_notification_manager(NotificationManager::from_env());
 ```
 
-You can also use static methods for one-off notifications:
+### ErrorEvent
+
+All providers receive an `ErrorEvent` with full context:
 
 ```rust
-use axtra::notifier::Notifier;
-use serde_json::json;
+pub struct ErrorEvent {
+    pub app_name: String,      // from APP_NAME env var
+    pub error_code: ErrorCode, // Database, Exception, etc.
+    pub message: String,       // human-readable error
+    pub location: String,      // e.g., "mymodule::handler:42"
+    pub timestamp: OffsetDateTime,
+    pub source_error: Option<String>, // error chain for debugging
+}
 
-// Send a one-off Slack message
-Notifier::slack("https://hooks.slack.com/services/XXX", "Hello!").await?;
+impl ErrorEvent {
+    // Maps error_code to severity for incident systems
+    pub fn severity(&self) -> &'static str; // "critical", "major", "minor", "warning"
+}
+```
 
-// Send a one-off rich Slack message (blocks)
-let blocks = json!([
-    { "type": "section", "text": { "type": "plain_text", "text": "Critical error occurred!" } }
-]);
-Notifier::slack_rich("https://hooks.slack.com/services/XXX", blocks).await?;
+### Custom Providers
 
-// Send a one-off Discord message
-Notifier::discord("https://discord.com/api/webhooks/XXX", "Hello!").await?;
+Implement `ErrorNotifier` to create your own provider:
 
-// Send a one-off rich Discord message (embeds)
-let embeds = json!([
-    { "title": "Error", "description": "Something went wrong!", "color": 16711680 }
-]);
-Notifier::discord_rich("https://discord.com/api/webhooks/XXX", embeds).await?;
+```rust
+use axtra::notifier::{ErrorNotifier, ErrorEvent, NotifyError, NotifyFuture};
+use reqwest::Client;
+
+struct MyProvider { /* config */ }
+
+impl ErrorNotifier for MyProvider {
+    fn notify<'a>(&'a self, client: &'a Client, event: &'a ErrorEvent) -> NotifyFuture<'a> {
+        Box::pin(async move {
+            // Send notification using the shared HTTP client
+            client.post("https://my-service.com/alert")
+                .json(&serde_json::json!({
+                    "message": event.message,
+                    "severity": event.severity(),
+                }))
+                .send()
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "my-provider"
+    }
+}
+```
+
+### NotifyError
+
+Use `NotifyError::transient()` for retryable errors (network issues) and `NotifyError::permanent()` for configuration errors:
+
+```rust
+client.post(url)
+    .send()
+    .await
+    .map_err(NotifyError::transient)?  // Network error - might work on retry
+    .error_for_status()
+    .map_err(NotifyError::permanent)?; // 4xx error - won't work on retry
 ```
 
 **See [`notifier/mod.rs`](./axtra/src/notifier/mod.rs) for full API details.**

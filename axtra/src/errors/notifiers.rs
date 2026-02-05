@@ -1,36 +1,57 @@
-//! Error notification handlers for Slack and Discord
+//! Error notification handlers using the pluggable notification system.
+//!
+//! This module provides a global [`NotificationManager`] that can be configured
+//! at application startup to send error notifications to multiple providers.
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use axtra::notifier::NotificationManager;
+//! use axtra::errors::notifiers::init_notification_manager;
+//!
+//! // Option 1: Auto-configure from environment variables
+//! init_notification_manager(NotificationManager::from_env());
+//!
+//! // Option 2: Manual configuration
+//! let manager = NotificationManager::builder()
+//!     .with_slack("https://hooks.slack.com/services/...")
+//!     .build();
+//! init_notification_manager(manager);
+//! ```
 
-#[cfg(any(feature = "notify-error-slack", feature = "notify-error-discord"))]
-use crate::notifier::Notifier;
+#[cfg(feature = "notifier")]
+use crate::notifier::NotificationManager;
 
-#[cfg(any(feature = "notify-error-slack", feature = "notify-error-discord"))]
+#[cfg(feature = "notifier")]
 use std::sync::OnceLock;
 
-// Notification Clients
-#[cfg(feature = "notify-error-slack")]
-static SLACK_NOTIFIER: OnceLock<Option<Notifier>> = OnceLock::new();
+#[cfg(feature = "notifier")]
+static NOTIFICATION_MANAGER: OnceLock<NotificationManager> = OnceLock::new();
 
-#[cfg(feature = "notify-error-slack")]
-pub fn slack_notifier() -> Option<&'static Notifier> {
-    SLACK_NOTIFIER
-        .get_or_init(|| {
-            std::env::var("SLACK_ERROR_WEBHOOK_URL")
-                .ok()
-                .map(Notifier::with_slack)
-        })
-        .as_ref()
+/// Initialize the global notification manager.
+///
+/// This should be called once at application startup. If called multiple times,
+/// subsequent calls are ignored and the original manager is retained.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use axtra::notifier::NotificationManager;
+/// use axtra::errors::notifiers::init_notification_manager;
+///
+/// init_notification_manager(NotificationManager::from_env());
+/// ```
+#[cfg(feature = "notifier")]
+pub fn init_notification_manager(manager: NotificationManager) {
+    let _ = NOTIFICATION_MANAGER.set(manager);
 }
 
-#[cfg(feature = "notify-error-discord")]
-static DISCORD_NOTIFIER: OnceLock<Option<Notifier>> = OnceLock::new();
-
-#[cfg(feature = "notify-error-discord")]
-pub fn discord_notifier() -> Option<&'static Notifier> {
-    DISCORD_NOTIFIER
-        .get_or_init(|| {
-            std::env::var("DISCORD_ERROR_WEBHOOK_URL")
-                .ok()
-                .map(Notifier::with_discord)
-        })
-        .as_ref()
+/// Get a reference to the global notification manager.
+///
+/// Returns `None` if the manager hasn't been initialized. In that case,
+/// a default manager will be created from environment variables on first
+/// notification attempt.
+#[cfg(feature = "notifier")]
+pub fn notification_manager() -> &'static NotificationManager {
+    NOTIFICATION_MANAGER.get_or_init(NotificationManager::from_env)
 }
