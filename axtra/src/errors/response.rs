@@ -84,15 +84,33 @@ impl AppError {
         }
     }
 
+    /// Returns the stable, developer-provided message without source error details.
+    /// Used for error tracking fingerprinting where the message must be consistent
+    /// across occurrences of the same logical error.
+    fn stable_message(&self) -> String {
+        match self {
+            AppError::Authentication { .. } => "Authentication failed".to_string(),
+            AppError::Authorization {
+                resource, action, ..
+            } => format!("'{action}' on '{resource}'"),
+            AppError::BadRequest { detail, .. } => detail.clone(),
+            AppError::Database { message, .. } => message.clone(),
+            AppError::Exception { detail, .. } => detail.clone(),
+            AppError::NotFound { resource, .. } => format!("Resource '{resource}'"),
+            AppError::Validation { .. } => "Invalid payload".to_string(),
+        }
+    }
+
     /// Send notification to all configured providers.
     #[cfg(feature = "notifier")]
     fn send_notification(&self) {
         let app_name = std::env::var("APP_NAME").unwrap_or_else(|_| "Rust".to_string());
         let error_code = self.code();
-        let message = self.log_message();
+        let message = self.stable_message();
         let location = self.location().to_string();
 
-        // Build the error event
+        // Build the error event with stable message for consistent fingerprinting.
+        // The varying source error chain is added separately below.
         let mut event = ErrorEvent::new(app_name, error_code, message, location);
 
         // Add source error chain if available

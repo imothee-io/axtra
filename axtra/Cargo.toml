@@ -1,6 +1,6 @@
 [package]
 name = "axtra"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Axtra is a Rust library for building web applications with Axum and Astro providing utilities for error handling, notifications, and more."
 repository = "https://github.com/imothee-io/axtra"
@@ -13,7 +13,7 @@ Inflector = "0.11.4"
 axum = "0.8.3"
 http = "1.3.1"
 serde = { version = "1.0.219", features = ["derive"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "time"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "time"] }
 thiserror = "2.0.12"
 time = "0.3.41"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
