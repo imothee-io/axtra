@@ -87,6 +87,7 @@ impl AppError {
     /// Returns the stable, developer-provided message without source error details.
     /// Used for error tracking fingerprinting where the message must be consistent
     /// across occurrences of the same logical error.
+    #[cfg(feature = "notifier")]
     fn stable_message(&self) -> String {
         match self {
             AppError::Authentication { .. } => "Authentication failed".to_string(),

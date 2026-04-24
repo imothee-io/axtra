@@ -178,13 +178,12 @@ impl ErrorNotifier for CmdlineProvider {
             }
             if let Some(ref extra) = event.extra {
                 // Merge with existing extra (location)
-                if let Some(existing) = payload.get_mut("extra") {
-                    if let (Some(existing_obj), Some(new_obj)) =
+                if let Some(existing) = payload.get_mut("extra")
+                    && let (Some(existing_obj), Some(new_obj)) =
                         (existing.as_object_mut(), extra.as_object())
-                    {
-                        for (k, v) in new_obj {
-                            existing_obj.insert(k.clone(), v.clone());
-                        }
+                {
+                    for (k, v) in new_obj {
+                        existing_obj.insert(k.clone(), v.clone());
                     }
                 }
             }
